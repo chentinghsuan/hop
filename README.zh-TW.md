@@ -54,23 +54,36 @@
 
 ### 1. 安裝 (Installation)
 
+#### 🍏 macOS / 🐧 Linux:
 ```bash
 # Clone 專案
-git clone https://github.com/ting-hsuanchen/hop.git
+git clone https://github.com/chentinghsuan/hop.git
 cd hop
 
 # 編譯並安裝至 ~/.local/bin (請確認 ~/.local/bin 已加入系統 PATH)
 make install
 ```
-
 > 💡 若需安裝到其他目錄，可指定 `INSTALL_DIR`，例如：`make install INSTALL_DIR=/usr/local/bin`
+
+#### 🪟 Windows (PowerShell / CMD):
+```powershell
+# Clone 專案
+git clone https://github.com/chentinghsuan/hop.git
+cd hop
+
+# 編譯出 hop.exe
+go build -ldflags="-s -w" -o hop.exe ./cmd/hop
+```
+> 💡 若有安裝 `make`，也可直接執行 `make build-windows`。編譯後的 `hop.exe` 可放置於任何已加入系統 `PATH` 的目錄中。
 
 ### 2. 初始化設定檔 (Initialize Config)
 
 ```bash
 hop init
 ```
-此指令會在 `~/.config/hop/config.yaml` 建立初學者範本設定檔。若欲覆蓋現有檔案，可加上 `--force` / `-f`。
+- **macOS / Linux**：預設建立於 `~/.config/hop/config.yaml`。
+- **Windows**：預設建立於 `%APPDATA%\hop\config.yaml`（同時自動向下相容 `%USERPROFILE%\.config\hop\config.yaml`）。
+- 若欲覆蓋現有檔案，可加上 `--force` / `-f`。
 
 ### 3. 檢查環境相依性 (Health Check)
 

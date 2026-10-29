@@ -54,23 +54,36 @@ English | [繁體中文](README.zh-TW.md)
 
 ### 1. Installation
 
+#### 🍏 macOS / 🐧 Linux:
 ```bash
 # Clone repository
-git clone https://github.com/ting-hsuanchen/hop.git
+git clone https://github.com/chentinghsuan/hop.git
 cd hop
 
 # Build and install to ~/.local/bin (ensure ~/.local/bin is in your PATH)
 make install
 ```
-
 > 💡 To install to a different directory, override `INSTALL_DIR`: `make install INSTALL_DIR=/usr/local/bin`
+
+#### 🪟 Windows (PowerShell / CMD):
+```powershell
+# Clone repository
+git clone https://github.com/chentinghsuan/hop.git
+cd hop
+
+# Build binary
+go build -ldflags="-s -w" -o hop.exe ./cmd/hop
+```
+> 💡 If `make` is installed, you can also run `make build-windows`. Place `hop.exe` in any folder included in your system `PATH`.
 
 ### 2. Initialize Configuration
 
 ```bash
 hop init
 ```
-This generates a starter template at `~/.config/hop/config.yaml`. To overwrite an existing configuration, pass `--force` / `-f`.
+- **macOS / Linux**: Created at `~/.config/hop/config.yaml`.
+- **Windows**: Created at `%APPDATA%\hop\config.yaml` (also backward compatible with `%USERPROFILE%\.config\hop\config.yaml`).
+- To overwrite an existing configuration, pass `--force` / `-f`.
 
 ### 3. Dependency & Auth Health Check
 

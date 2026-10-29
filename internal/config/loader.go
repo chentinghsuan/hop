@@ -16,8 +16,14 @@ const (
 	LegacyEnvConfigVar  = "ENV_LOGIN_CONFIG"
 )
 
-// GetDefaultConfigPath returns ~/.config/hop/config.yaml
+// GetDefaultConfigPath returns standard user config path for the current OS.
+// On Windows: %APPDATA%\hop\config.yaml (or ~/.config/hop/config.yaml if APPDATA is unset)
+// On Linux/macOS: ~/.config/hop/config.yaml
 func GetDefaultConfigPath() (string, error) {
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		return filepath.Join(configDir, ConfigDirName, ConfigFileName), nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("could not determine user home directory: %w", err)
@@ -46,19 +52,31 @@ func FindConfigFile(customPath string) (string, error) {
 		}
 	}
 
-	// 2. Check ~/.config/hop/config.yaml, then legacy ~/.config/env-login/config.yaml
+	// 2. Check standard OS config directories (%APPDATA% on Windows, ~/.config on Linux/macOS)
+	var userConfigs []string
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		userConfigs = append(userConfigs,
+			filepath.Join(configDir, ConfigDirName, "config.yaml"),
+			filepath.Join(configDir, ConfigDirName, "config.yml"),
+			filepath.Join(configDir, LegacyConfigDirName, "config.yaml"),
+			filepath.Join(configDir, LegacyConfigDirName, "config.yml"),
+		)
+	}
+
+	// Also check ~/.config on all platforms (common for developers on Windows with Git Bash / WSL)
 	home, err := os.UserHomeDir()
 	if err == nil {
-		userConfigs := []string{
+		userConfigs = append(userConfigs,
 			filepath.Join(home, ".config", ConfigDirName, "config.yaml"),
 			filepath.Join(home, ".config", ConfigDirName, "config.yml"),
 			filepath.Join(home, ".config", LegacyConfigDirName, "config.yaml"),
 			filepath.Join(home, ".config", LegacyConfigDirName, "config.yml"),
-		}
-		for _, p := range userConfigs {
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
-			}
+		)
+	}
+
+	for _, p := range userConfigs {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
 		}
 	}
 

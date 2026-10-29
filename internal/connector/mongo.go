@@ -44,9 +44,12 @@ func (c *MongoConnector) Connect(ctx context.Context, target config.ResolvedTarg
 		return err
 	}
 
-	mongoBin := "mongosh"
-	if _, err := exec.LookPath("mongosh"); err != nil {
-		mongoBin = "mongo"
+	mongoBin, err := exec.LookPath("mongosh")
+	if err != nil {
+		mongoBin, err = exec.LookPath("mongo")
+		if err != nil {
+			return errors.New("neither 'mongosh' nor legacy 'mongo' CLI was found. Install it via 'brew install mongosh' or on Windows 'winget install MongoDB.Server'")
+		}
 	}
 
 	// 1. Resolve password from Secret Provider

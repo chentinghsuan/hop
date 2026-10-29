@@ -103,7 +103,12 @@ func (c *MySQLConnector) Connect(ctx context.Context, target config.ResolvedTarg
 
 	color.Cyan("Connecting to MySQL: %s@%s:%d/%s...", user, host, port, dbName)
 
-	cmd := exec.CommandContext(ctx, "mysql", args...)
+	binPath, err := exec.LookPath("mysql")
+	if err != nil {
+		return errors.New("'mysql' client CLI is not found. Install it via 'brew install mysql-client' or on Windows 'winget install Oracle.MySQL'")
+	}
+
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

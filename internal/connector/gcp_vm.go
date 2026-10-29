@@ -81,7 +81,12 @@ func (c *GCPVMConnector) Connect(ctx context.Context, target config.ResolvedTarg
 	color.Cyan("Connecting to GCP VM: %s (zone: %s, project: %s)...", instance, zone, project)
 	color.HiBlackString("Executing: gcloud %v", args)
 
-	cmd := exec.CommandContext(ctx, "gcloud", args...)
+	binPath, err := exec.LookPath("gcloud")
+	if err != nil {
+		return errors.New("'gcloud' CLI is not found. Install Google Cloud SDK first")
+	}
+
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -8,8 +8,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
+
+func bwUnlockHint() string {
+	if runtime.GOOS == "windows" {
+		return "$env:BW_SESSION = (bw unlock --raw)"
+	}
+	return "export BW_SESSION=$(bw unlock --raw)"
+}
 
 type BitwardenProvider struct{}
 
@@ -43,7 +51,7 @@ func (b *BitwardenProvider) Validate(ctx context.Context) error {
 			return errors.New("Bitwarden is not logged in. Please run 'bw login' first")
 		}
 		if status.Status == "locked" && os.Getenv("BW_SESSION") == "" {
-			return errors.New("Bitwarden vault is locked. Please run: export BW_SESSION=$(bw unlock --raw)")
+			return fmt.Errorf("Bitwarden vault is locked. Please run: %s", bwUnlockHint())
 		}
 	}
 
@@ -53,7 +61,7 @@ func (b *BitwardenProvider) Validate(ctx context.Context) error {
 func (b *BitwardenProvider) GetSecret(ctx context.Context, ref SecretRef) (string, error) {
 	bwPath, err := exec.LookPath("bw")
 	if err != nil {
-		return "", errors.New("'bw' command not found. Install it via 'brew install bitwarden-cli'")
+		return "", errors.New("'bw' command not found. Install it via 'brew install bitwarden-cli' or on Windows 'winget install Bitwarden.CLI'")
 	}
 
 	field := ref.Field
@@ -63,7 +71,7 @@ func (b *BitwardenProvider) GetSecret(ctx context.Context, ref SecretRef) (strin
 
 	sessionKey := os.Getenv("BW_SESSION")
 	if sessionKey == "" {
-		return "", errors.New("Bitwarden vault is locked (BW_SESSION is not set in this terminal).\nPlease run: bwu (or: export BW_SESSION=$(bw unlock --raw))")
+		return "", fmt.Errorf("Bitwarden vault is locked (BW_SESSION is not set in this terminal).\nPlease run: %s", bwUnlockHint())
 	}
 
 	// If requesting standard password, 'bw get password' is the cleanest and fastest

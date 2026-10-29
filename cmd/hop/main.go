@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/fatih/color"
@@ -307,7 +308,11 @@ func newCheckCmd(reg *connector.Registry, sec secret.Resolver) *cobra.Command {
 			if bwSession := os.Getenv("BW_SESSION"); bwSession == "" {
 				color.Yellow("\nTip for Bitwarden users:")
 				fmt.Println("  To unlock Bitwarden vault, run:")
-				color.Cyan("  export BW_SESSION=$(bw unlock --raw)\n")
+				if runtime.GOOS == "windows" {
+					color.Cyan("  $env:BW_SESSION = (bw unlock --raw)\n")
+				} else {
+					color.Cyan("  export BW_SESSION=$(bw unlock --raw)\n")
+				}
 			}
 		},
 	}
@@ -317,7 +322,7 @@ func newInitCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize starter config file in ~/.config/hop/config.yaml",
+		Short: "Initialize starter config file (e.g., ~/.config/hop/config.yaml or %APPDATA%\\hop\\config.yaml)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			defaultPath, err := config.GetDefaultConfigPath()
 			if err != nil {
