@@ -12,7 +12,8 @@
 
 ## 🌟 核心特色 (Key Features)
 
-- 🔒 **AI Agent 安全防護 (Zero-Plaintext Security)**：本機設定檔完全不存放任何密碼。機敏資訊在連線瞬間直接由 **Bitwarden**、**1Password** 或 **GCP Secret Manager** 注入記憶體與進程環境，連本機 AI Agent 與讀檔腳本都無法窺探。
+- 🔒 **AI Agent 安全防護 (Zero-Plaintext Security)**：本機設定檔完全不存放任何密碼。機敏資訊在連線瞬間直接由 **Bitwarden**、**1Password**、**GCP Secret Manager** 或 **GCP Cloud KMS** 注入記憶體與進程環境，連本機 AI Agent 與讀檔腳本都無法窺探。
+- ⚡ **雙模式高效存取 (SDK & CLI Dual Mode)**：針對 GCP Secret Manager 與 KMS，支援原生高吞吐量 **Go 官方 SDK**（低延遲、免開 Python 子進程）與本機 **gcloud CLI** 雙模式，可在設定檔中彈性切換 `mode: "sdk"` 或 `mode: "gcloud"`。
 - 🎯 **智慧權杖路由 (Smart Token Matcher)**：支援無序快速連線，輸入 `hop mongo prod user` 或 `hop prod user mongo` 順序任意，系統自動解析環境、服務與實例；若有多筆相符則開啟選單過濾。
 - ⚡ **預設屬性繼承 (Service Defaults Inheritance)**：支援在服務層級設定 `defaults`（例如共用的 `port`、`user`、`auth_source`），各 Cluster / Database 只要專注定義差異欄位即可。
 - 🎨 **現代互動選單 (Interactive TUI Menu)**：
@@ -44,7 +45,8 @@
 │ - Bitwarden (`bw`)       │ ──(In-Memory)──▶│ - GCP VM (`gcloud ssh`)  │
 │ - 1Password (`op`)       │                 │ - MySQL CLI (`mysql`)    │
 │ - GCP Secret Manager     │                 │ - MongoDB Atlas (`mongosh)
-│ - [Extensible Provider]  │                 │ - [Extensible: GKE, ...] │
+│ - GCP Cloud KMS          │                 │ - [Extensible: GKE, ...] │
+│ - Environment (`env`)    │                 │                          │
 └──────────────────────────┘                 └──────────────────────────┘
 ```
 

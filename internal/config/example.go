@@ -61,7 +61,23 @@ environments:
         user: "app_user"
         database: "user_service"
         secret:
-          item: "prod-mysql-user"
+          provider: "gcp_secret_manager" # or "gcp"
+          item: "prod-mysql-credentials"
+          project: "company-prod-gcp"
+          field: "password" # JSON field extraction
+          mode: "sdk"       # "sdk" (fastest, default) or "gcloud"
+
+      billing:
+        description: "Billing database protected by Cloud KMS"
+        host: "billing-db.company.internal"
+        port: 3306
+        user: "billing_app"
+        database: "billing"
+        secret:
+          provider: "gcp_kms" # Encrypted locally with Cloud KMS
+          key: "projects/company-prod-gcp/locations/global/keyRings/db-ring/cryptoKeys/db-key"
+          ciphertext: "CiQA5n3sX...==" # Generated via 'hop encrypt --key ...'
+          mode: "sdk"
 
     # GCP Compute Engine VMs
     # Connect via: hop gcp prod api

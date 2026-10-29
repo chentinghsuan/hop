@@ -8,11 +8,15 @@ import (
 
 // SecretConfig defines how credentials are dynamically retrieved from a secret provider.
 type SecretConfig struct {
-	Provider string `yaml:"provider" json:"provider"`
-	Item     string `yaml:"item" json:"item"`
-	Field    string `yaml:"field" json:"field"`   // e.g., "password" (default)
-	Version  string `yaml:"version" json:"version"` // e.g., "latest" for GCP
-	Vault    string `yaml:"vault" json:"vault"`     // Optional for 1Password
+	Provider   string `yaml:"provider" json:"provider"`
+	Item       string `yaml:"item" json:"item"`
+	Field      string `yaml:"field" json:"field"`           // e.g., "password" (default)
+	Version    string `yaml:"version" json:"version"`       // e.g., "latest" for GCP
+	Vault      string `yaml:"vault" json:"vault"`           // Optional for 1Password
+	Project    string `yaml:"project" json:"project"`       // GCP Project ID for Secret Manager / KMS
+	Mode       string `yaml:"mode" json:"mode"`             // "sdk" (default) or "gcloud"
+	Ciphertext string `yaml:"ciphertext" json:"ciphertext"` // Encrypted base64 ciphertext for KMS
+	Key        string `yaml:"key" json:"key"`               // KMS CryptoKey resource path
 }
 
 // Config is the root configuration structure.
@@ -153,6 +157,18 @@ func extractSecretConfig(resolvedProps map[string]any, defaultProvider string) S
 	}
 	if vault, ok := secMap["vault"].(string); ok && vault != "" {
 		sec.Vault = vault
+	}
+	if project, ok := secMap["project"].(string); ok && project != "" {
+		sec.Project = project
+	}
+	if mode, ok := secMap["mode"].(string); ok && mode != "" {
+		sec.Mode = mode
+	}
+	if ct, ok := secMap["ciphertext"].(string); ok && ct != "" {
+		sec.Ciphertext = ct
+	}
+	if key, ok := secMap["key"].(string); ok && key != "" {
+		sec.Key = key
 	}
 
 	return sec

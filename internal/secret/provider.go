@@ -10,11 +10,15 @@ import (
 
 // SecretRef wraps the reference info required to fetch a secret.
 type SecretRef struct {
-	Provider string
-	Item     string
-	Field    string
-	Version  string
-	Vault    string
+	Provider   string
+	Item       string
+	Field      string
+	Version    string
+	Vault      string
+	Project    string
+	Mode       string
+	Ciphertext string
+	Key        string
 }
 
 // SecretProvider abstracts different secret vaults (Bitwarden, 1Password, GCP, etc.).
@@ -54,8 +58,8 @@ func (r *defaultResolver) AllProviders() map[string]SecretProvider {
 }
 
 func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) (string, error) {
-	if sec.Item == "" {
-		return "", nil // No secret item configured
+	if sec.Item == "" && sec.Ciphertext == "" {
+		return "", nil // No secret item or ciphertext configured
 	}
 
 	providerName := strings.ToLower(sec.Provider)
@@ -63,22 +67,38 @@ func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) 
 		providerName = "bitwarden"
 	}
 
+	// Normalize provider aliases
+	switch providerName {
+	case "secret_manager", "gcp_secret_manager", "gcp-secret-manager":
+		providerName = "gcp"
+	case "kms", "gcp-kms":
+		providerName = "gcp_kms"
+	}
+
 	p, ok := r.providers[providerName]
 	if !ok {
-		return "", fmt.Errorf("unsupported secret provider: %q (available: bitwarden, 1password, gcp)", providerName)
+		return "", fmt.Errorf("unsupported secret provider: %q (available: bitwarden, 1password, gcp, gcp_kms, env)", providerName)
 	}
 
 	ref := SecretRef{
-		Provider: providerName,
-		Item:     sec.Item,
-		Field:    sec.Field,
-		Version:  sec.Version,
-		Vault:    sec.Vault,
+		Provider:   providerName,
+		Item:       sec.Item,
+		Field:      sec.Field,
+		Version:    sec.Version,
+		Vault:      sec.Vault,
+		Project:    sec.Project,
+		Mode:       sec.Mode,
+		Ciphertext: sec.Ciphertext,
+		Key:        sec.Key,
 	}
 
 	secretVal, err := p.GetSecret(ctx, ref)
 	if err != nil {
-		return "", fmt.Errorf("[%s] failed to retrieve secret for %q: %w", p.Name(), sec.Item, err)
+		targetName := sec.Item
+		if targetName == "" {
+			targetName = sec.Key
+		}
+		return "", fmt.Errorf("[%s] failed to retrieve secret for %q: %w", p.Name(), targetName, err)
 	}
 
 	return secretVal, nil

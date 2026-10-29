@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
@@ -32,6 +34,7 @@ func main() {
 		secret.NewBitwardenProvider(),
 		secret.NewOnePasswordProvider(),
 		secret.NewGCPSecretProvider(),
+		secret.NewGCPKMSProvider(),
 		secret.NewEnvProvider(),
 	)
 
@@ -87,6 +90,7 @@ Examples:
 	rootCmd.AddCommand(newCheckCmd(connRegistry, secResolver))
 	rootCmd.AddCommand(newInitCmd())
 	rootCmd.AddCommand(newVersionCmd())
+	rootCmd.AddCommand(newEncryptCmd())
 
 	os.Args = routeArgs(os.Args)
 
@@ -101,7 +105,7 @@ func routeArgs(args []string) []string {
 	}
 
 	known := map[string]bool{
-		"list": true, "check": true, "init": true, "version": true, "help": true, "completion": true, "connect": true,
+		"list": true, "check": true, "init": true, "version": true, "help": true, "completion": true, "connect": true, "encrypt": true,
 	}
 
 	// If help or list flag is present anywhere, handle accordingly
@@ -361,4 +365,68 @@ func newVersionCmd() *cobra.Command {
 			fmt.Printf("hop version %s\n", Version)
 		},
 	}
+}
+
+func newEncryptCmd() *cobra.Command {
+	var (
+		kmsKey    string
+		mode      string
+		secretVal string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "encrypt",
+		Short: "Encrypt a secret using GCP Cloud KMS for use in config.yaml",
+		Long: `Encrypts a plaintext secret with GCP Cloud KMS and outputs
+the ciphertext ready to be pasted into your ~/.config/hop/config.yaml.`,
+		Example: `  # Interactive prompt (hides secret from terminal history):
+  hop encrypt --key projects/my-prj/locations/global/keyRings/my-ring/cryptoKeys/my-key
+
+  # Specify plaintext directly via flag:
+  hop encrypt --key projects/my-prj/locations/global/keyRings/my-ring/cryptoKeys/my-key --secret "my-password"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if kmsKey == "" {
+				return errors.New("missing required flag --key (KMS CryptoKey resource name, e.g. projects/P/locations/L/keyRings/R/cryptoKeys/K)")
+			}
+
+			if secretVal == "" {
+				prompt := &survey.Password{
+					Message: "Enter secret to encrypt:",
+				}
+				if err := survey.AskOne(prompt, &secretVal); err != nil {
+					return err
+				}
+			}
+
+			if strings.TrimSpace(secretVal) == "" {
+				return errors.New("cannot encrypt empty secret")
+			}
+
+			color.Cyan("Encrypting with GCP KMS (%s mode)...", mode)
+			ciphertext, err := secret.EncryptKMS(cmd.Context(), kmsKey, secretVal, mode)
+			if err != nil {
+				return err
+			}
+
+			color.Green("\n✔ Encryption successful!\n")
+			fmt.Println("Ciphertext (Base64):")
+			color.Yellow("  %s\n", ciphertext)
+			fmt.Println("Paste this into your config.yaml:")
+			fmt.Printf(`  secret:
+    provider: gcp_kms
+    key: %q
+    ciphertext: %q
+`, kmsKey, ciphertext)
+			if mode != "" && mode != "sdk" {
+				fmt.Printf("    mode: %q\n", mode)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&kmsKey, "key", "k", "", "GCP Cloud KMS CryptoKey resource path")
+	cmd.Flags().StringVarP(&mode, "mode", "m", "sdk", "KMS execution mode: 'sdk' (default) or 'gcloud'")
+	cmd.Flags().StringVarP(&secretVal, "secret", "s", "", "Plaintext secret to encrypt (if omitted, will prompt securely)")
+
+	return cmd
 }

@@ -12,7 +12,8 @@ English | [繁體中文](README.zh-TW.md)
 
 ## 🌟 Key Features
 
-- 🔒 **Zero-Plaintext Security (AI Agent Safe)**: No credentials or secrets are ever stored in local config files. Secrets are retrieved dynamically at connection time from **Bitwarden**, **1Password**, or **GCP Secret Manager** and injected in-memory/environment, safe from local file-reading scripts or AI agents.
+- 🔒 **Zero-Plaintext Security (AI Agent Safe)**: No credentials or secrets are ever stored in local config files. Secrets are retrieved dynamically at connection time from **Bitwarden**, **1Password**, **GCP Secret Manager**, or **GCP Cloud KMS** and injected in-memory/environment, safe from local file-reading scripts or AI agents.
+- ⚡ **Dual Engine (Go SDK & CLI Mode)**: Supports high-performance in-process **Go Official SDKs** (sub-millisecond latency, zero-process spawning) and local **gcloud CLI** execution, seamlessly switchable via `mode: "sdk"` or `mode: "gcloud"`.
 - 🎯 **Smart Token Routing**: Order-independent instant connection. Running `hop mongo prod user` or `hop prod user mongo` automatically resolves the target environment, service, and instance.
 - ⚡ **Service Defaults Inheritance**: Define shared defaults (such as `port`, `user`, or `auth_source`) at the service level in YAML so individual cluster configs remain lightweight.
 - 🎨 **Modern Interactive TUI**:
