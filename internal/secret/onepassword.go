@@ -7,12 +7,24 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
-type OnePasswordProvider struct{}
+type opCacheEntry struct {
+	done chan struct{}
+	val  string
+	err  error
+}
+
+type OnePasswordProvider struct {
+	mu    sync.Mutex
+	cache map[string]*opCacheEntry
+}
 
 func NewOnePasswordProvider() *OnePasswordProvider {
-	return &OnePasswordProvider{}
+	return &OnePasswordProvider{
+		cache: make(map[string]*opCacheEntry),
+	}
 }
 
 func (o *OnePasswordProvider) Name() string {
@@ -46,7 +58,14 @@ func (o *OnePasswordProvider) GetSecret(ctx context.Context, ref SecretRef) (str
 	var args []string
 	if strings.HasPrefix(ref.Item, "op://") {
 		// Native secret reference syntax (e.g. op://vault/item/password)
-		args = []string{"read", ref.Item}
+		itemURI := ref.Item
+		if field == "username" {
+			// If user configured op://vault/item/password, change to op://vault/item/username
+			if idx := strings.LastIndex(itemURI, "/"); idx != -1 {
+				itemURI = itemURI[:idx] + "/username"
+			}
+		}
+		args = []string{"read", itemURI}
 	} else {
 		// Item name or ID
 		args = []string{"item", "get", ref.Item, "--fields", field, "--reveal"}
@@ -55,18 +74,45 @@ func (o *OnePasswordProvider) GetSecret(ctx context.Context, ref SecretRef) (str
 		}
 	}
 
+	cacheKey := strings.Join(args, " ")
+
+	o.mu.Lock()
+	if entry, ok := o.cache[cacheKey]; ok {
+		o.mu.Unlock()
+		select {
+		case <-entry.done:
+			return entry.val, entry.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	entry := &opCacheEntry{done: make(chan struct{})}
+	o.cache[cacheKey] = entry
+	o.mu.Unlock()
+
 	cmd := exec.CommandContext(ctx, opPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if runErr != nil {
 		errStr := strings.TrimSpace(stderr.String())
 		if errStr != "" {
-			return "", fmt.Errorf("%s", errStr)
+			entry.err = fmt.Errorf("%s", errStr)
+		} else {
+			entry.err = runErr
 		}
-		return "", err
+		o.mu.Lock()
+		delete(o.cache, cacheKey)
+		o.mu.Unlock()
+		close(entry.done)
+		return "", entry.err
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	entry.val = strings.TrimSpace(stdout.String())
+	close(entry.done)
+
+	return entry.val, nil
 }

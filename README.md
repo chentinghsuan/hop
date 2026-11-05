@@ -12,12 +12,13 @@ English | [繁體中文](README.zh-TW.md)
 
 ## 🌟 Key Features
 
-- 🔒 **Zero-Plaintext Security (AI Agent Safe)**: No credentials or secrets are ever stored in local config files. Secrets are retrieved dynamically at connection time from **Bitwarden**, **1Password**, **GCP Secret Manager**, or **GCP Cloud KMS** and injected in-memory/environment, safe from local file-reading scripts or AI agents.
+- 🔒 **Zero-Plaintext & Zero-Credential Config**: No credentials or passwords are ever stored in local config files. Secrets are retrieved dynamically at connection time from **Bitwarden**, **1Password**, **GCP Secret Manager**, **GCP Cloud KMS**, or **Environment variables / `.env`**. When stored as JSON `{"username": "...", "password": "..."}` or vault items, `hop` automatically extracts both username and password, keeping your YAML 100% credential-free.
 - ⚡ **Dual Engine (Go SDK & CLI Mode)**: Supports high-performance in-process **Go Official SDKs** (sub-millisecond latency, zero-process spawning) and local **gcloud CLI** execution, seamlessly switchable via `mode: "sdk"` or `mode: "gcloud"`.
 - 🎯 **Smart Token Routing**: Order-independent instant connection. Running `hop mongo prod user` or `hop prod user mongo` automatically resolves the target environment, service, and instance.
 - ⚡ **Service Defaults Inheritance**: Define shared defaults (such as `port`, `user`, or `auth_source`) at the service level in YAML so individual cluster configs remain lightweight.
 - 🎨 **Modern Interactive TUI**:
-  - **Hierarchical Drilldown (Default)**: Step-by-step selection (Environment ➔ Service ➔ Instance).
+  - **Hierarchical Drilldown (Default)**: Step-by-step selection (Environment ➔ Service ➔ Instance) with **`← 返回上一步 (Back)`** navigation.
+  - **Cursor-Hover Secret Prefetching**: Automatically warms up secret caches in the background when hovering over items, achieving instantaneous connections upon pressing Enter.
   - **Flat Fuzzy Search**: Pass `-F` or `--flat` for instantaneous keyword filtering across all targets.
 - 🔌 **Pluggable Architecture**: Built on clean Go interfaces. Adding new connectors such as **GKE, Redis, or PostgreSQL** requires implementing just a single driver file.
 
@@ -43,9 +44,10 @@ English | [繁體中文](README.zh-TW.md)
 │   Secret Providers       │                 │   Connectors (Drivers)   │
 ├──────────────────────────┤                 ├──────────────────────────┤
 │ - Bitwarden (`bw`)       │ ──(In-Memory)──▶│ - GCP VM (`gcloud ssh`)  │
-│ - 1Password (`op`)       │                 │ - MySQL CLI (`mysql`)    │
+│ - 1Password (`op`)       │                 │ - MySQL / TiDB (`mysql`) │
 │ - GCP Secret Manager     │                 │ - MongoDB Atlas (`mongosh)
-│ - [Extensible Provider]  │                 │ - [Extensible: GKE, ...] │
+│ - GCP Cloud KMS          │                 │ - [Extensible: GKE, ...] │
+│ - Environment (`env`)    │                 │                          │
 └──────────────────────────┘                 └──────────────────────────┘
 ```
 
@@ -176,7 +178,7 @@ environments:
         secret:
           item: "prod-mongo-analytics"
 
-    # MySQL
+    # MySQL / MariaDB
     # Command: hop mysql prod user
     mysql:
       user:
@@ -185,6 +187,7 @@ environments:
         port: 3306
         user: "app_user"
         database: "user_service"
+        extra_args: ["--ssl-mode=VERIFY_IDENTITY"] # Optional custom CLI flags
         secret:
           item: "prod-mysql-user"
 
@@ -203,60 +206,68 @@ environments:
 
 ## 🔐 Secret Providers Setup
 
+### Zero-Credential Auto-Inference
+When a secret item (in GCP Secret Manager, `.env`, Bitwarden, or 1Password) contains both username and password, `hop` automatically extracts them. You can omit `user:` from `config.yaml` for a truly 100% credential-free local configuration.
+
 ### 1. Bitwarden (`bw`)
-1. Install CLI: `brew install bitwarden-cli`
+1. Install CLI: `brew install bitwarden-cli` (or on Windows: `winget install Bitwarden.CLI`)
 2. Log in: `bw login`
 3. Unlock vault session:
    ```bash
    export BW_SESSION=$(bw unlock --raw)
+   # Windows PowerShell:
+   # $env:BW_SESSION = (bw unlock --raw)
    ```
-   > 💡 With `BW_SESSION` set, credentials are provided directly in memory. No plaintext files are written to disk.
+   > 💡 With `BW_SESSION` set, credentials are provided directly in memory. If `user` is omitted in `config.yaml`, `hop` automatically extracts the username from the Bitwarden item.
 
 ### 2. 1Password (`op`)
 1. Install CLI: `brew install --cask 1password-cli`
-2. Supports native `op://<vault>/<item>/<field>` URI syntax or simple item names.
+2. Supports native `op://<vault>/<item>/<field>` URI syntax or simple item names. Automatically infers the username when omitted.
 
-### 3. GCP Secret Manager (`gcloud`)
-1. Authenticate via `gcloud auth login`.
-2. The config's `item` maps to the GCP Secret ID (defaults to the `latest` version).
+### 3. GCP Secret Manager (`gcp`)
+1. Authenticate:
+   - **Go SDK Mode (Default)**: Run `gcloud auth application-default login` for ultra-fast, in-process API access.
+   - **gcloud CLI Mode**: Run `gcloud auth login` (set `mode: "gcloud"` in YAML).
+2. The config's `item` maps to the GCP Secret ID (defaults to `latest` version).
+3. If the secret payload is formatted as JSON:
+   ```json
+   {
+     "username": "my_db_user",
+     "password": "my_super_secret_password"
+   }
+   ```
+   `hop` automatically parses both the password and username without needing `field:` or `user:` in `config.yaml`.
+
+### 4. GCP Cloud KMS (`gcp_kms`)
+For storing encrypted ciphertext directly in `config.yaml` that can only be decrypted with Google Cloud KMS permissions:
+1. Encrypt your secret using `hop encrypt`:
+   ```bash
+   hop encrypt --key projects/<PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY> --plaintext "my_secret_password"
+   ```
+2. Paste the resulting ciphertext in your config:
+   ```yaml
+   secret:
+     provider: gcp_kms
+     key: "projects/<PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY>"
+     ciphertext: "CiQA...=="
+   ```
+
+### 5. Environment Variables & `.env` (`env`)
+Load secrets from environment variables or local `.env` files:
+```yaml
+secret:
+  provider: env
+  item: "MY_DATABASE_SECRET" # reads $MY_DATABASE_SECRET
+```
+- Automatically reads `.env` in the current working directory, or `~/.config/hop/.env` (on Windows: `%APPDATA%\hop\.env`).
+- Also supports JSON payloads `{"username": "...", "password": "..."}` for zero-credential config.
 
 ---
 
-## 🛠 Adding a New Connector
+## 🤝 Contributing
 
-Thanks to the decoupled driver interface, adding a new connector (e.g. **GKE**) requires just 3 steps:
-
-1. Create `internal/connector/gke.go`:
-   ```go
-   package connector
-
-   import (
-       "context"
-       "github.com/ting-hsuanchen/hop/internal/config"
-       "github.com/ting-hsuanchen/hop/internal/secret"
-   )
-
-   type GKEConnector struct{}
-
-   func NewGKEConnector() *GKEConnector { return &GKEConnector{} }
-   func (c *GKEConnector) Type() string { return "gke" }
-   func (c *GKEConnector) Aliases() []string { return []string{"k8s", "kube"} }
-   func (c *GKEConnector) ValidateDependencies() error { /* Check kubectl / gcloud */ return nil }
-   func (c *GKEConnector) Connect(ctx context.Context, target config.ResolvedTarget, sec secret.Resolver) error {
-       // Execute gcloud container clusters get-credentials or kubectl exec
-       return nil
-   }
-   ```
-2. Register the connector in `cmd/hop/main.go`:
-   ```go
-   connRegistry := connector.NewRegistry(
-       connector.NewGCPVMConnector(),
-       connector.NewMySQLConnector(),
-       connector.NewMongoConnector(),
-       connector.NewGKEConnector(), // 👈 Registered here
-   )
-   ```
-3. Add targets under `gke` in `config.yaml`, and connect with `hop gke prod cluster-01`!
+Contributions, bug reports, and suggestions are welcome!  
+If you would like to contribute code or add support for new services (such as Redis, PostgreSQL, or GKE), please check out our [Contribution Guidelines](CONTRIBUTING.md).
 
 ---
 

@@ -31,13 +31,22 @@ func TestExtractJSONField(t *testing.T) {
 		t.Fatalf("expected error for non-existent field, got nil")
 	}
 
-	// 4. Empty field returns raw
+	// 4. Empty field on plain text returns raw
 	val, err = extractJSONField("raw-text-secret", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if val != "raw-text-secret" {
 		t.Fatalf("expected 'raw-text-secret', got %q", val)
+	}
+
+	// 5. Empty field on JSON automatically defaults to "password"
+	val, err = extractJSONField(jsonData, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "superSecretPassword123" {
+		t.Fatalf("expected 'superSecretPassword123' when field is empty on JSON, got %q", val)
 	}
 }
 
@@ -81,3 +90,4 @@ func TestBuildSecretResourceName(t *testing.T) {
 		})
 	}
 }
+

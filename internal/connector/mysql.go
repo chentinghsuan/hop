@@ -28,50 +28,31 @@ func (c *MySQLConnector) Aliases() []string {
 }
 
 func (c *MySQLConnector) ValidateDependencies() error {
-	if _, err := exec.LookPath("mysql"); err != nil {
-		return errors.New("'mysql' client CLI is not found. Install it via 'brew install mysql-client'")
+	_, err := findMySQLBin()
+	return err
+}
+
+func findMySQLBin() (string, error) {
+	binPath, err := exec.LookPath("mysql")
+	if err != nil {
+		return "", errors.New("'mysql' client CLI is not found. Install it via 'brew install mysql-client' or on Windows 'winget install Oracle.MySQL'")
 	}
-	return nil
+	return binPath, nil
 }
 
 func (c *MySQLConnector) Connect(ctx context.Context, target config.ResolvedTarget, resolver secret.Resolver) error {
-	if err := c.ValidateDependencies(); err != nil {
+	binPath, err := findMySQLBin()
+	if err != nil {
 		return err
 	}
 
 	host := GetString(target.Properties, "host", "127.0.0.1")
 	port := GetInt(target.Properties, "port", 3306)
-	user := GetString(target.Properties, "user", "")
 	dbName := GetString(target.Properties, "database", "")
 
-	// 1. Resolve password from Secret Provider
-	var password string
-	if target.Secret.Item != "" {
-		color.HiBlack("Fetching MySQL credentials from [%s]...", target.Secret.Provider)
-		var err error
-		password, err = resolver.Resolve(ctx, target.Secret)
-		if err != nil {
-			return err
-		}
-		if password == "" {
-			return fmt.Errorf("retrieved password from [%s] for item %q is empty! Please check that the Password field in Bitwarden is filled",
-				target.Secret.Provider, target.Secret.Item)
-		}
-
-		// If user is not set, try to get username from secret
-		if user == "" {
-			userSec := target.Secret
-			userSec.Field = "username"
-			if u, err := resolver.Resolve(ctx, userSec); err == nil && u != "" {
-				user = u
-			}
-		}
-	} else if pwd := GetString(target.Properties, "password", ""); pwd != "" {
-		password = pwd
-	}
-
-	if user == "" {
-		user = "root"
+	user, password, err := ResolveCredentials(ctx, "MySQL", target, resolver, "root")
+	if err != nil {
+		return err
 	}
 
 	args := []string{
@@ -88,25 +69,21 @@ func (c *MySQLConnector) Connect(ctx context.Context, target config.ResolvedTarg
 		args = append(args, fmt.Sprintf("--ssl-mode=%s", sslMode))
 	}
 
+	if sslCA := GetString(target.Properties, "ssl_ca", ""); sslCA != "" {
+		args = append(args, fmt.Sprintf("--ssl-ca=%s", sslCA))
+	}
+
+	if GetBool(target.Properties, "comments", false) {
+		args = append(args, "--comments")
+	}
+
+	args = append(args, GetStringSlice(target.Properties, "extra_args")...)
+
 	if dbName != "" {
 		args = append(args, dbName)
 	}
 
-	// Extra args if any
-	if extra, ok := target.Properties["extra_args"].([]any); ok {
-		for _, a := range extra {
-			if s, ok := a.(string); ok {
-				args = append(args, s)
-			}
-		}
-	}
-
 	color.Cyan("Connecting to MySQL: %s@%s:%d/%s...", user, host, port, dbName)
-
-	binPath, err := exec.LookPath("mysql")
-	if err != nil {
-		return errors.New("'mysql' client CLI is not found. Install it via 'brew install mysql-client' or on Windows 'winget install Oracle.MySQL'")
-	}
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Stdin = os.Stdin

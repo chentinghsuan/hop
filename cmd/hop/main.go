@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -63,9 +64,6 @@ Examples:
   hop prod mongo     (opens menu with prod mongo clusters)
   hop user           (opens menu filtered to 'user')`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if listFlag {
-				return runList(cmd.Context(), connRegistry, secResolver)
-			}
 			return runConnect(cmd.Context(), args, connRegistry, secResolver)
 		},
 		SilenceUsage: true,
@@ -167,45 +165,24 @@ func runConnect(ctx context.Context, args []string, reg *connector.Registry, sec
 			targetToConnect = matchResult.ExactSingle
 		} else if len(matchResult.Candidates) > 0 {
 			color.Cyan("Multiple targets matched your tokens %v. Please choose one:", args)
-			var selected *config.ResolvedTarget
-			var err error
-			if flatFlag {
-				selected, err = ui.SelectTarget(matchResult.Candidates)
-			} else {
-				selected, err = ui.SelectHierarchical(matchResult.Candidates)
-			}
+			targetToConnect, err = selectFromMenu(ctx, matchResult.Candidates, sec)
 			if err != nil {
 				return err
 			}
-			targetToConnect = selected
 		} else {
 			color.Yellow("No targets matched your input tokens: %v", args)
 			color.White("Falling back to target selection:")
-			var selected *config.ResolvedTarget
-			var err error
-			if flatFlag {
-				selected, err = ui.SelectTarget(targets)
-			} else {
-				selected, err = ui.SelectHierarchical(targets)
-			}
+			targetToConnect, err = selectFromMenu(ctx, targets, sec)
 			if err != nil {
 				return err
 			}
-			targetToConnect = selected
 		}
 	} else {
 		// No arguments: default to 3-stage hierarchical drill down!
-		var selected *config.ResolvedTarget
-		var err error
-		if flatFlag {
-			selected, err = ui.SelectTarget(targets)
-		} else {
-			selected, err = ui.SelectHierarchical(targets)
-		}
+		targetToConnect, err = selectFromMenu(ctx, targets, sec)
 		if err != nil {
 			return err
 		}
-		targetToConnect = selected
 	}
 
 	if targetToConnect == nil {
@@ -220,6 +197,16 @@ func runConnect(ctx context.Context, args []string, reg *connector.Registry, sec
 	}
 
 	return conn.Connect(ctx, *targetToConnect, sec)
+}
+
+func selectFromMenu(ctx context.Context, candidates []config.ResolvedTarget, sec secret.Resolver) (*config.ResolvedTarget, error) {
+	prefetchFn := func(t config.ResolvedTarget) {
+		connector.PrefetchCredentials(ctx, t, sec)
+	}
+	if flatFlag {
+		return ui.SelectTarget(candidates, prefetchFn)
+	}
+	return ui.SelectHierarchical(candidates, prefetchFn)
 }
 
 func newListCmd(reg *connector.Registry, sec secret.Resolver) *cobra.Command {
@@ -251,11 +238,6 @@ func runList(ctx context.Context, reg *connector.Registry, sec secret.Resolver) 
 	table.SetAutoWrapText(false)
 
 	for _, t := range targets {
-		secInfo := "-"
-		if t.Secret.Item != "" {
-			secInfo = fmt.Sprintf("%s (%s)", t.Secret.Provider, t.Secret.Item)
-		}
-
 		desc := connector.GetString(t.Properties, "description", "-")
 
 		table.Append([]string{
@@ -263,7 +245,7 @@ func runList(ctx context.Context, reg *connector.Registry, sec secret.Resolver) 
 			t.ServiceType,
 			t.InstanceKey,
 			desc,
-			secInfo,
+			t.Secret.Summary(),
 		})
 	}
 
@@ -282,8 +264,16 @@ func newCheckCmd(reg *connector.Registry, sec secret.Resolver) *cobra.Command {
 			table.SetHeader([]string{"Category", "Tool / Service", "Status", "Details"})
 			table.SetBorder(true)
 
-			// 1. Secret Providers
-			for name, p := range sec.AllProviders() {
+			// 1. Secret Providers (sorted for deterministic output)
+			providers := sec.AllProviders()
+			providerNames := make([]string, 0, len(providers))
+			for name := range providers {
+				providerNames = append(providerNames, name)
+			}
+			sort.Strings(providerNames)
+
+			for _, name := range providerNames {
+				p := providers[name]
 				err := p.Validate(cmd.Context())
 				status := color.GreenString("READY")
 				detail := "CLI installed and ready"

@@ -2,8 +2,11 @@ package connector
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/fatih/color"
 	"github.com/ting-hsuanchen/hop/internal/config"
 	"github.com/ting-hsuanchen/hop/internal/secret"
 )
@@ -51,7 +54,7 @@ func (r *Registry) Get(serviceType string) (Connector, bool) {
 	return c, ok
 }
 
-// AllUnique returns a list of unique connectors.
+// AllUnique returns a deterministic list of unique connectors sorted by Type.
 func (r *Registry) AllUnique() []Connector {
 	seen := make(map[string]bool)
 	var list []Connector
@@ -61,6 +64,9 @@ func (r *Registry) AllUnique() []Connector {
 			list = append(list, c)
 		}
 	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].Type() < list[j].Type()
+	})
 	return list
 }
 
@@ -74,6 +80,57 @@ func (r *Registry) FormatSupportedTypes() string {
 	return strings.Join(names, ", ")
 }
 
+// ResolveCredentials retrieves the username and password for a target from its SecretConfig or fallback properties.
+func ResolveCredentials(ctx context.Context, serviceLabel string, target config.ResolvedTarget, resolver secret.Resolver, defaultUser string) (string, string, error) {
+	user := GetString(target.Properties, "user", "")
+	var password string
+
+	if target.Secret.HasSecret() {
+		color.HiBlack("Fetching %s credentials from [%s]...", serviceLabel, target.Secret.Provider)
+		var err error
+		password, err = resolver.Resolve(ctx, target.Secret)
+		if err != nil {
+			return "", "", err
+		}
+		if password == "" {
+			return "", "", fmt.Errorf("retrieved password from [%s] is empty", target.Secret.Provider)
+		}
+
+		// If user is not explicitly configured, attempt to fetch the username field
+		if user == "" {
+			userSec := target.Secret
+			userSec.Field = "username"
+			if u, err := resolver.Resolve(ctx, userSec); err == nil && u != "" {
+				user = u
+			}
+		}
+	} else if pwd := GetString(target.Properties, "password", ""); pwd != "" {
+		password = pwd
+	}
+
+	if user == "" {
+		user = defaultUser
+	}
+
+	return user, password, nil
+}
+
+// PrefetchCredentials asynchronously warms up the secret cache for a target
+// while the user is browsing the interactive menu.
+func PrefetchCredentials(ctx context.Context, target config.ResolvedTarget, resolver secret.Resolver) {
+	if resolver == nil || !target.Secret.HasSecret() {
+		return
+	}
+	resolver.Prefetch(ctx, target.Secret)
+
+	user := GetString(target.Properties, "user", "")
+	if user == "" {
+		userSec := target.Secret
+		userSec.Field = "username"
+		resolver.Prefetch(ctx, userSec)
+	}
+}
+
 // Helper to convert any to string
 func GetString(props map[string]any, key, fallback string) string {
 	if v, ok := props[key]; ok {
@@ -82,6 +139,27 @@ func GetString(props map[string]any, key, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// Helper to convert any to []string
+func GetStringSlice(props map[string]any, key string) []string {
+	raw, ok := props[key]
+	if !ok {
+		return nil
+	}
+	switch slice := raw.(type) {
+	case []string:
+		return slice
+	case []any:
+		var out []string
+		for _, item := range slice {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // Helper to convert any to int

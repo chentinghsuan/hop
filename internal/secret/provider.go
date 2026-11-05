@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ting-hsuanchen/hop/internal/config"
 )
@@ -31,21 +33,35 @@ type SecretProvider interface {
 // Resolver resolves secrets for a target using registered providers.
 type Resolver interface {
 	Resolve(ctx context.Context, sec config.SecretConfig) (string, error)
+	Prefetch(ctx context.Context, sec config.SecretConfig)
 	GetProvider(name string) (SecretProvider, bool)
 	AllProviders() map[string]SecretProvider
 }
 
-type defaultResolver struct {
-	providers map[string]SecretProvider
+type cacheEntry struct {
+	done chan struct{}
+	val  string
+	err  error
 }
 
-// NewResolver creates a resolver with registered providers.
+type defaultResolver struct {
+	providers   map[string]SecretProvider
+	mu          sync.Mutex
+	cache       map[SecretRef]*cacheEntry
+	prefetchSem chan struct{}
+}
+
+// NewResolver creates a resolver with registered providers, in-memory caching, and background prefetch support.
 func NewResolver(providers ...SecretProvider) Resolver {
 	m := make(map[string]SecretProvider)
 	for _, p := range providers {
 		m[strings.ToLower(p.Name())] = p
 	}
-	return &defaultResolver{providers: m}
+	return &defaultResolver{
+		providers:   m,
+		cache:       make(map[SecretRef]*cacheEntry),
+		prefetchSem: make(chan struct{}, 2), // limit concurrent background CLI processes
+	}
 }
 
 func (r *defaultResolver) GetProvider(name string) (SecretProvider, bool) {
@@ -57,11 +73,7 @@ func (r *defaultResolver) AllProviders() map[string]SecretProvider {
 	return r.providers
 }
 
-func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) (string, error) {
-	if sec.Item == "" && sec.Ciphertext == "" {
-		return "", nil // No secret item or ciphertext configured
-	}
-
+func (r *defaultResolver) prepareRef(sec config.SecretConfig) (SecretRef, SecretProvider, error) {
 	providerName := strings.ToLower(sec.Provider)
 	if providerName == "" {
 		providerName = "bitwarden"
@@ -77,7 +89,7 @@ func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) 
 
 	p, ok := r.providers[providerName]
 	if !ok {
-		return "", fmt.Errorf("unsupported secret provider: %q (available: bitwarden, 1password, gcp, gcp_kms, env)", providerName)
+		return SecretRef{}, nil, fmt.Errorf("unsupported secret provider: %q (available: bitwarden, 1password, gcp, gcp_kms, env)", providerName)
 	}
 
 	ref := SecretRef{
@@ -91,8 +103,95 @@ func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) 
 		Ciphertext: sec.Ciphertext,
 		Key:        sec.Key,
 	}
+	return ref, p, nil
+}
+
+// Prefetch asynchronously fetches and caches a secret in the background.
+// If the secret is already cached or currently being fetched, Prefetch is a no-op.
+func (r *defaultResolver) Prefetch(ctx context.Context, sec config.SecretConfig) {
+	if !sec.HasSecret() {
+		return
+	}
+
+	ref, p, err := r.prepareRef(sec)
+	if err != nil {
+		return
+	}
+
+	r.mu.Lock()
+	if _, exists := r.cache[ref]; exists {
+		r.mu.Unlock()
+		return
+	}
+	entry := &cacheEntry{done: make(chan struct{})}
+	r.cache[ref] = entry
+	r.mu.Unlock()
+
+	go func() {
+		// Acquire concurrency slot so rapid cursor movements don't spawn too many CLI processes at once
+		r.prefetchSem <- struct{}{}
+		defer func() { <-r.prefetchSem }()
+
+		fetchCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		val, fetchErr := p.GetSecret(fetchCtx, ref)
+		entry.val = val
+		entry.err = fetchErr
+
+		if fetchErr != nil || val == "" {
+			r.mu.Lock()
+			if r.cache[ref] == entry {
+				delete(r.cache, ref)
+			}
+			r.mu.Unlock()
+		}
+		close(entry.done)
+	}()
+}
+
+func (r *defaultResolver) Resolve(ctx context.Context, sec config.SecretConfig) (string, error) {
+	if !sec.HasSecret() {
+		return "", nil // No secret item or ciphertext configured
+	}
+
+	ref, p, err := r.prepareRef(sec)
+	if err != nil {
+		return "", err
+	}
+
+	r.mu.Lock()
+	if existing, ok := r.cache[ref]; ok {
+		r.mu.Unlock()
+		select {
+		case <-existing.done:
+			if existing.err == nil && existing.val != "" {
+				return existing.val, nil
+			}
+			// If background prefetch failed, fall through to retry synchronously
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		r.mu.Lock()
+	}
+
+	entry := &cacheEntry{done: make(chan struct{})}
+	r.cache[ref] = entry
+	r.mu.Unlock()
 
 	secretVal, err := p.GetSecret(ctx, ref)
+	entry.val = secretVal
+	entry.err = err
+
+	if err != nil || secretVal == "" {
+		r.mu.Lock()
+		if r.cache[ref] == entry {
+			delete(r.cache, ref)
+		}
+		r.mu.Unlock()
+	}
+	close(entry.done)
+
 	if err != nil {
 		targetName := sec.Item
 		if targetName == "" {

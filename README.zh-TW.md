@@ -12,14 +12,15 @@
 
 ## 🌟 核心特色 (Key Features)
 
-- 🔒 **AI Agent 安全防護 (Zero-Plaintext Security)**：本機設定檔完全不存放任何密碼。機敏資訊在連線瞬間直接由 **Bitwarden**、**1Password**、**GCP Secret Manager** 或 **GCP Cloud KMS** 注入記憶體與進程環境，連本機 AI Agent 與讀檔腳本都無法窺探。
+- 🔒 **AI Agent 安全防護與零明文設定 (Zero-Plaintext & Zero-Credential)**：本機設定檔完全不存放任何密碼。機敏資訊在連線瞬間直接由 **Bitwarden**、**1Password**、**GCP Secret Manager**、**GCP Cloud KMS** 或 **環境變數 / `.env`** 注入記憶體。當 Secret 以 JSON `{"username": "...", "password": "..."}` 儲存時，系統自動解析帳號與密碼，設定檔可完全不寫帳號密碼，連本機 AI Agent 與讀檔腳本都無法窺探。
 - ⚡ **雙模式高效存取 (SDK & CLI Dual Mode)**：針對 GCP Secret Manager 與 KMS，支援原生高吞吐量 **Go 官方 SDK**（低延遲、免開 Python 子進程）與本機 **gcloud CLI** 雙模式，可在設定檔中彈性切換 `mode: "sdk"` 或 `mode: "gcloud"`。
 - 🎯 **智慧權杖路由 (Smart Token Matcher)**：支援無序快速連線，輸入 `hop mongo prod user` 或 `hop prod user mongo` 順序任意，系統自動解析環境、服務與實例；若有多筆相符則開啟選單過濾。
 - ⚡ **預設屬性繼承 (Service Defaults Inheritance)**：支援在服務層級設定 `defaults`（例如共用的 `port`、`user`、`auth_source`），各 Cluster / Database 只要專注定義差異欄位即可。
 - 🎨 **現代互動選單 (Interactive TUI Menu)**：
-  - **預設階層選單**：依序鑽取選擇（環境 Environment ➔ 服務 Service ➔ 目標 Instance）。
+  - **預設階層選單**：依序鑽取選擇（環境 Environment ➔ 服務 Service ➔ 目標 Instance），支援 **`← 返回上一步 (Back)`** 隨時退回重選。
+  - **游標懸停預取 (Hover Prefetching)**：游標懸停選項時背景自動非同步預先暖機快取 Secret，按下 Enter 連線零等待。
   - **扁平模糊搜尋**：搭配 `-F` / `--flat` 即時模糊過濾所有目標。
-- 🔌 **極度易擴充 (Pluggable Connectors)**：基於 Go 介面抽象與工廠註冊模式，未來擴充 **GKE、Redis、PostgreSQL** 只要實作單一檔案即可無痛接入。
+- 🔌 **極度易擴充 (Pluggable Connectors)**：基於 Go 介面抽象與工廠註冊模式，未來擴充 **GKE、Redis、PostgreSQL** 只要實作單一檔案即可無痛接入。相容 TiDB、MariaDB、AWS Aurora 等 MySQL 協定資料庫。
 
 ---
 
@@ -43,7 +44,7 @@
 │   Secret Providers       │                 │   Connectors (Drivers)   │
 ├──────────────────────────┤                 ├──────────────────────────┤
 │ - Bitwarden (`bw`)       │ ──(In-Memory)──▶│ - GCP VM (`gcloud ssh`)  │
-│ - 1Password (`op`)       │                 │ - MySQL CLI (`mysql`)    │
+│ - 1Password (`op`)       │                 │ - MySQL / TiDB (`mysql`) │
 │ - GCP Secret Manager     │                 │ - MongoDB Atlas (`mongosh)
 │ - GCP Cloud KMS          │                 │ - [Extensible: GKE, ...] │
 │ - Environment (`env`)    │                 │                          │
@@ -177,7 +178,7 @@ environments:
         secret:
           item: "prod-mongo-analytics"
 
-    # MySQL 設定
+    # MySQL / MariaDB 設定
     # 連線指令: hop mysql prod user
     mysql:
       user:
@@ -186,6 +187,7 @@ environments:
         port: 3306
         user: "app_user"
         database: "user_service"
+        extra_args: ["--ssl-mode=VERIFY_IDENTITY"] # 選填：自訂 CLI 附加參數
         secret:
           item: "prod-mysql-user"
 
@@ -204,60 +206,68 @@ environments:
 
 ## 🔐 密鑰提供者設定 (Secret Providers)
 
+### 零帳密自動推導 (Zero-Credential Auto-Inference)
+當保險庫或 Secret Manager 儲存的內容同時包含使用者名稱與密碼時，`hop` 會自動解析帳號與密碼，您在 `config.yaml` 中可直接省略 `user:`，達到本機設定檔完全零帳號、零密碼的最高資安規格。
+
 ### 1. Bitwarden (`bw`)
-1. 安裝 CLI：`brew install bitwarden-cli`
+1. 安裝 CLI：`brew install bitwarden-cli`（Windows: `winget install Bitwarden.CLI`）
 2. 登入帳號：`bw login`
 3. 工作階段解鎖：
    ```bash
    export BW_SESSION=$(bw unlock --raw)
+   # Windows PowerShell:
+   # $env:BW_SESSION = (bw unlock --raw)
    ```
-   > 💡 只要設定 `BW_SESSION`，連線時密碼會在記憶體向 `bw` 取得，不會在硬碟產生任何明文檔案。
+   > 💡 只要設定 `BW_SESSION`，連線時密碼會在記憶體向 `bw` 取得，不會在硬碟產生任何明文檔案。若 `config.yaml` 未設定 `user`，系統會自動抓取項目中的帳號名稱。
 
 ### 2. 1Password (`op`)
 1. 安裝 CLI：`brew install --cask 1password-cli`
-2. 支援 `op://<vault>/<item>/<field>` 原生路徑語法或 Item 名稱。
+2. 支援 `op://<vault>/<item>/<field>` 原生路徑語法或 Item 名稱。若省略 `user`，系統亦會自動獲取使用者名稱。
 
-### 3. GCP Secret Manager (`gcloud`)
-1. 透過 `gcloud auth login` 登入。
-2. 設定檔中的 `item` 對應 GCP Secret ID，預設讀取 `latest` 版本。
+### 3. GCP Secret Manager (`gcp`)
+1. 驗證認證：
+   - **Go SDK 模式（預設）**：執行 `gcloud auth application-default login`，享有低延遲、無子進程的高效能存取。
+   - **gcloud CLI 模式**：執行 `gcloud auth login`（設定檔中指定 `mode: "gcloud"`）。
+2. 設定檔中的 `item` 對應 GCP Secret ID（預設讀取 `latest` 版本）。
+3. 若 Secret 內容為 JSON 格式：
+   ```json
+   {
+     "username": "my_db_user",
+     "password": "my_super_secret_password"
+   }
+   ```
+   `hop` 會自動同時解析帳號與密碼，設定檔完全不需要指定 `user:` 或 `field:`。
+
+### 4. GCP Cloud KMS (`gcp_kms`)
+若希望將密鑰直接加密後貼在 `config.yaml`（僅擁有 GCP KMS 解密權限的工程師能連線）：
+1. 使用 `hop encrypt` 加密機敏字串：
+   ```bash
+   hop encrypt --key projects/<PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY> --plaintext "my_secret_password"
+   ```
+2. 將輸出的密文貼入設定檔：
+   ```yaml
+   secret:
+     provider: gcp_kms
+     key: "projects/<PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY>"
+     ciphertext: "CiQA...=="
+   ```
+
+### 5. 環境變數與 `.env` (`env`)
+直接從本機環境變數或 `.env` 檔案載入機敏資料：
+```yaml
+secret:
+  provider: env
+  item: "MY_DATABASE_SECRET" # 讀取 $MY_DATABASE_SECRET
+```
+- 自動搜尋執行目錄下的 `.env` 或 `~/.config/hop/.env`（Windows: `%APPDATA%\hop\.env`）。
+- 同樣支援 JSON `{"username": "...", "password": "..."}` 格式以省略 `user:`。
 
 ---
 
-## 🛠 如何擴充新連線器 (How to Add a New Connector)
+## 🤝 參與貢獻 (Contributing)
 
-本專案採用高度解耦的介面設計，若要新增 **GKE (Kubernetes)** 連線器，只需 3 個步驟：
-
-1. 在 `internal/connector/` 建立 `gke.go`：
-   ```go
-   package connector
-
-   import (
-       "context"
-       "github.com/ting-hsuanchen/hop/internal/config"
-       "github.com/ting-hsuanchen/hop/internal/secret"
-   )
-
-   type GKEConnector struct{}
-
-   func NewGKEConnector() *GKEConnector { return &GKEConnector{} }
-   func (c *GKEConnector) Type() string { return "gke" }
-   func (c *GKEConnector) Aliases() []string { return []string{"k8s", "kube"} }
-   func (c *GKEConnector) ValidateDependencies() error { /* 檢查 kubectl / gcloud */ return nil }
-   func (c *GKEConnector) Connect(ctx context.Context, target config.ResolvedTarget, sec secret.Resolver) error {
-       // 執行 gcloud container clusters get-credentials 或 kubectl exec
-       return nil
-   }
-   ```
-2. 在 `cmd/hop/main.go` 註冊：
-   ```go
-   connRegistry := connector.NewRegistry(
-       connector.NewGCPVMConnector(),
-       connector.NewMySQLConnector(),
-       connector.NewMongoConnector(),
-       connector.NewGKEConnector(), // 👈 註冊新連線器
-   )
-   ```
-3. 在 `config.yaml` 加上 `gke` 的目標設定，即可直接使用 `hop gke prod cluster-01` 連線！
+非常歡迎提交 Issue、建議或 Pull Request！  
+若您想為 hop 新增服務連線器（如 Redis、PostgreSQL、GKE 等）或改善功能，請參考完整的 [貢獻指南 (CONTRIBUTING.md)](CONTRIBUTING.md)。
 
 ---
 

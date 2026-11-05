@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 func bwUnlockHint() string {
@@ -19,10 +20,33 @@ func bwUnlockHint() string {
 	return "export BW_SESSION=$(bw unlock --raw)"
 }
 
-type BitwardenProvider struct{}
+type bwItemData struct {
+	Login struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	} `json:"login"`
+	Notes  string `json:"notes"`
+	Fields []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"fields"`
+}
+
+type bwItemEntry struct {
+	done chan struct{}
+	data bwItemData
+	err  error
+}
+
+type BitwardenProvider struct {
+	mu    sync.Mutex
+	items map[string]*bwItemEntry
+}
 
 func NewBitwardenProvider() *BitwardenProvider {
-	return &BitwardenProvider{}
+	return &BitwardenProvider{
+		items: make(map[string]*bwItemEntry),
+	}
 }
 
 func (b *BitwardenProvider) Name() string {
@@ -69,83 +93,39 @@ func (b *BitwardenProvider) GetSecret(ctx context.Context, ref SecretRef) (strin
 		field = "password"
 	}
 
-	sessionKey := os.Getenv("BW_SESSION")
-	if sessionKey == "" {
+	if os.Getenv("BW_SESSION") == "" {
 		return "", fmt.Errorf("Bitwarden vault is locked (BW_SESSION is not set in this terminal).\nPlease run: %s", bwUnlockHint())
 	}
 
-	// If requesting standard password, 'bw get password' is the cleanest and fastest
-	if strings.ToLower(field) == "password" {
-		args := []string{"get", "password", ref.Item, "--session", sessionKey}
-
-		cmd := exec.CommandContext(ctx, bwPath, args...)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		err = cmd.Run()
-		stderrStr := strings.TrimSpace(stderr.String())
-		stdoutStr := strings.TrimSpace(stdout.String())
-
-		if strings.Contains(stderrStr, "Vault is locked") || strings.Contains(stderrStr, "Session key is invalid") || strings.Contains(stderrStr, "Master password") {
-			return "", errors.New("Bitwarden vault is locked or session expired.\nPlease run: bwu (or: export BW_SESSION=$(bw unlock --raw))")
-		}
-
-		if err != nil {
-			if stderrStr != "" {
-				return "", fmt.Errorf("%s", stderrStr)
-			}
-			return "", err
-		}
-
-		if stdoutStr == "" {
-			return "", fmt.Errorf("item %q found in Bitwarden, but its Password field is empty", ref.Item)
-		}
-
-		return stdoutStr, nil
-	}
-
-	// For custom field, username, or notes, query full item JSON
-	args := []string{"get", "item", ref.Item, "--session", sessionKey}
-
-	cmd := exec.CommandContext(ctx, bwPath, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-	stderrStr := strings.TrimSpace(stderr.String())
-
-	if strings.Contains(stderrStr, "Vault is locked") || strings.Contains(stderrStr, "Session key is invalid") || strings.Contains(stderrStr, "Master password") {
-		return "", errors.New("Bitwarden vault is locked or session expired.\nPlease run: bwu (or: export BW_SESSION=$(bw unlock --raw))")
-	}
-
+	itemData, err := b.getItem(ctx, bwPath, ref.Item)
 	if err != nil {
-		if stderrStr != "" {
-			return "", fmt.Errorf("%s", stderrStr)
-		}
 		return "", err
 	}
 
-	var itemData struct {
-		Login struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		} `json:"login"`
-		Notes  string `json:"notes"`
-		Fields []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"fields"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &itemData); err != nil {
-		return "", fmt.Errorf("failed to parse Bitwarden item JSON: %w", err)
-	}
-
 	switch strings.ToLower(field) {
+	case "password":
+		if itemData.Login.Password != "" {
+			return itemData.Login.Password, nil
+		}
+		for _, f := range itemData.Fields {
+			if strings.EqualFold(f.Name, "password") && f.Value != "" {
+				return f.Value, nil
+			}
+		}
+		return "", fmt.Errorf("item %q found in Bitwarden, but its Password field is empty", ref.Item)
 	case "username":
-		return itemData.Login.Username, nil
+		if itemData.Login.Username != "" {
+			return itemData.Login.Username, nil
+		}
+		// Fallback to custom fields
+		for _, f := range itemData.Fields {
+			if strings.EqualFold(f.Name, "username") || strings.EqualFold(f.Name, "user") {
+				if f.Value != "" {
+					return f.Value, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("username not found in Bitwarden item %q", ref.Item)
 	case "notes":
 		return itemData.Notes, nil
 	default:
@@ -158,4 +138,67 @@ func (b *BitwardenProvider) GetSecret(ctx context.Context, ref SecretRef) (strin
 	}
 
 	return "", fmt.Errorf("field %q not found in Bitwarden item %q", field, ref.Item)
+}
+
+func (b *BitwardenProvider) getItem(ctx context.Context, bwPath, itemKey string) (bwItemData, error) {
+	b.mu.Lock()
+	if existing, ok := b.items[itemKey]; ok {
+		b.mu.Unlock()
+		select {
+		case <-existing.done:
+			if existing.err == nil {
+				return existing.data, nil
+			}
+		case <-ctx.Done():
+			return bwItemData{}, ctx.Err()
+		}
+		b.mu.Lock()
+	}
+
+	entry := &bwItemEntry{done: make(chan struct{})}
+	b.items[itemKey] = entry
+	b.mu.Unlock()
+
+	stdoutStr, err := runBW(ctx, bwPath, "get", "item", itemKey)
+	if err == nil {
+		if unmarshalErr := json.Unmarshal([]byte(stdoutStr), &entry.data); unmarshalErr != nil {
+			err = fmt.Errorf("failed to parse Bitwarden item JSON: %w", unmarshalErr)
+		}
+	}
+	entry.err = err
+
+	if err != nil {
+		b.mu.Lock()
+		if b.items[itemKey] == entry {
+			delete(b.items, itemKey)
+		}
+		b.mu.Unlock()
+	}
+	close(entry.done)
+
+	return entry.data, entry.err
+}
+
+func runBW(ctx context.Context, bwPath string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, bwPath, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	stderrStr := strings.TrimSpace(stderr.String())
+	stdoutStr := strings.TrimSpace(stdout.String())
+
+	if strings.Contains(stderrStr, "Vault is locked") || strings.Contains(stderrStr, "Session key is invalid") || strings.Contains(stderrStr, "Master password") {
+		return "", fmt.Errorf("Bitwarden vault is locked or session expired.\nPlease run: %s", bwUnlockHint())
+	}
+
+	if err != nil {
+		if stderrStr != "" {
+			return "", fmt.Errorf("%s", stderrStr)
+		}
+		return "", err
+	}
+
+	return stdoutStr, nil
 }

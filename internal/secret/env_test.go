@@ -34,5 +34,25 @@ func TestEnvProvider(t *testing.T) {
 	if val != "superSecretValue" {
 		t.Fatalf("expected 'superSecretValue', got %q", val)
 	}
+
+	// 3. JSON in env
+	os.Setenv("HOP_TEST_JSON", `{"username": "jsonUser", "password": "jsonPassword"}`)
+	defer os.Unsetenv("HOP_TEST_JSON")
+
+	pwd, err := p.GetSecret(ctx, SecretRef{Item: "HOP_TEST_JSON"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pwd != "jsonPassword" {
+		t.Fatalf("expected 'jsonPassword', got %q", pwd)
+	}
+
+	user, err := p.GetSecret(ctx, SecretRef{Item: "HOP_TEST_JSON", Field: "username"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != "jsonUser" {
+		t.Fatalf("expected 'jsonUser', got %q", user)
+	}
 }
 

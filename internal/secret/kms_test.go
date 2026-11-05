@@ -38,3 +38,4 @@ func TestGCPKMSProviderValidation(t *testing.T) {
 		t.Fatalf("expected error for invalid base64, got nil")
 	}
 }
+

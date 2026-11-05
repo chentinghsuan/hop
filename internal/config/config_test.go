@@ -98,3 +98,83 @@ environments:
 		t.Errorf("expected db 'order_prod', got %q", db)
 	}
 }
+
+func TestResolveTargets_DeterministicAndDeepMerge(t *testing.T) {
+	rawYAML := `
+version: "1.0"
+default_secret_provider: bitwarden
+environments:
+  stage:
+    name: Staging
+    mysql:
+      defaults:
+        host: 127.0.0.1
+        port: 3306
+        secret:
+          provider: gcp_kms
+          key: "projects/my-prj/locations/global/keyRings/ring/cryptoKeys/db-key"
+      b_order:
+        database: order_db
+        secret:
+          ciphertext: "CIPHER_ORDER"
+      a_user:
+        database: user_db
+        secret:
+          ciphertext: "CIPHER_USER"
+  prod:
+    name: Production
+    mongo:
+      user:
+        uri: "mongodb://localhost:27017"
+        secret:
+          provider: gcp
+          item: "prod-mongo-user"
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(rawYAML), &cfg); err != nil {
+		t.Fatalf("failed to unmarshal config: %v", err)
+	}
+
+	targets, err := cfg.ResolveTargets()
+	if err != nil {
+		t.Fatalf("ResolveTargets failed: %v", err)
+	}
+
+	if len(targets) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(targets))
+	}
+
+	// 1. Verify document preservation order: stage/b_order -> stage/a_user -> prod/user
+	if targets[0].EnvKey != "stage" || targets[0].InstanceKey != "b_order" {
+		t.Errorf("expected first target to be stage/b_order (file order), got %s/%s", targets[0].EnvKey, targets[0].InstanceKey)
+	}
+	if targets[1].EnvKey != "stage" || targets[1].InstanceKey != "a_user" {
+		t.Errorf("expected second target to be stage/a_user (file order), got %s/%s", targets[1].EnvKey, targets[1].InstanceKey)
+	}
+	if targets[2].EnvKey != "prod" || targets[2].InstanceKey != "user" {
+		t.Errorf("expected third target to be prod/user (file order), got %s/%s", targets[2].EnvKey, targets[2].InstanceKey)
+	}
+
+	// 2. Verify deep merge of defaults.secret with instance secret
+	kmsTarget := targets[1]
+	if kmsTarget.Secret.Provider != "gcp_kms" {
+		t.Errorf("expected inherited provider 'gcp_kms', got %q", kmsTarget.Secret.Provider)
+	}
+	if kmsTarget.Secret.Key != "projects/my-prj/locations/global/keyRings/ring/cryptoKeys/db-key" {
+		t.Errorf("expected inherited KMS key, got %q", kmsTarget.Secret.Key)
+	}
+	if kmsTarget.Secret.Ciphertext != "CIPHER_USER" {
+		t.Errorf("expected instance ciphertext 'CIPHER_USER', got %q", kmsTarget.Secret.Ciphertext)
+	}
+	if !kmsTarget.Secret.HasSecret() {
+		t.Errorf("expected HasSecret() to be true for KMS target")
+	}
+	if got := kmsTarget.Secret.Summary(); got != "gcp_kms (key:db-key)" {
+		t.Errorf("expected Summary() 'gcp_kms (key:db-key)', got %q", got)
+	}
+
+	// 3. Verify empty default Field so plain secrets in GCP/KMS work without JSON parsing errors
+	if kmsTarget.Secret.Field != "" {
+		t.Errorf("expected empty default Field, got %q", kmsTarget.Secret.Field)
+	}
+}

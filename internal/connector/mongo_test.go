@@ -1,7 +1,11 @@
 package connector
 
 import (
+	"context"
 	"testing"
+
+	"github.com/ting-hsuanchen/hop/internal/config"
+	"github.com/ting-hsuanchen/hop/internal/secret"
 )
 
 func TestMaskMongoURI(t *testing.T) {
@@ -59,4 +63,47 @@ func TestMongoConnectorMetadata(t *testing.T) {
 		t.Errorf("expected alias 'atlas' in MongoConnector aliases")
 	}
 }
+
+type mockKMSProvider struct{}
+
+func (m *mockKMSProvider) Name() string                      { return "gcp_kms" }
+func (m *mockKMSProvider) Validate(ctx context.Context) error { return nil }
+func (m *mockKMSProvider) GetSecret(ctx context.Context, ref secret.SecretRef) (string, error) {
+	if ref.Field == "username" {
+		return "kms_admin", nil
+	}
+	return "kms_decrypted_pwd", nil
+}
+
+func TestResolveCredentials_KMSAndGetStringSlice(t *testing.T) {
+	resolver := secret.NewResolver(&mockKMSProvider{})
+	target := config.ResolvedTarget{
+		Properties: map[string]any{
+			"extra_args": []any{"--tls", "--quiet"},
+		},
+		Secret: config.SecretConfig{
+			Provider:   "gcp_kms",
+			Key:        "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+			Ciphertext: "BASE64_CIPHER",
+			Field:      "password",
+		},
+	}
+
+	user, pwd, err := ResolveCredentials(context.Background(), "Mongo", target, resolver, "default_user")
+	if err != nil {
+		t.Fatalf("ResolveCredentials failed: %v", err)
+	}
+	if pwd != "kms_decrypted_pwd" {
+		t.Errorf("expected password 'kms_decrypted_pwd', got %q", pwd)
+	}
+	if user != "kms_admin" {
+		t.Errorf("expected auto-resolved username 'kms_admin', got %q", user)
+	}
+
+	extra := GetStringSlice(target.Properties, "extra_args")
+	if len(extra) != 2 || extra[0] != "--tls" || extra[1] != "--quiet" {
+		t.Errorf("unexpected extra_args: %v", extra)
+	}
+}
+
 

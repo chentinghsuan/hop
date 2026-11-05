@@ -30,67 +30,45 @@ func (c *MongoConnector) Aliases() []string {
 }
 
 func (c *MongoConnector) ValidateDependencies() error {
-	if _, err := exec.LookPath("mongosh"); err == nil {
-		return nil
+	_, err := findMongoBin()
+	return err
+}
+
+func findMongoBin() (string, error) {
+	if bin, err := exec.LookPath("mongosh"); err == nil {
+		return bin, nil
 	}
-	if _, err := exec.LookPath("mongo"); err == nil {
-		return nil
+	if bin, err := exec.LookPath("mongo"); err == nil {
+		return bin, nil
 	}
-	return errors.New("neither 'mongosh' nor legacy 'mongo' CLI was found. Install it via 'brew install mongosh'")
+	return "", errors.New("neither 'mongosh' nor legacy 'mongo' CLI was found. Install it via 'brew install mongosh' or on Windows 'winget install MongoDB.Server'")
 }
 
 func (c *MongoConnector) Connect(ctx context.Context, target config.ResolvedTarget, resolver secret.Resolver) error {
-	if err := c.ValidateDependencies(); err != nil {
+	mongoBin, err := findMongoBin()
+	if err != nil {
 		return err
 	}
 
-	mongoBin, err := exec.LookPath("mongosh")
+	// 1. Resolve user and password from Secret Provider or fallback properties
+	user, password, err := ResolveCredentials(ctx, "Mongo", target, resolver, "")
 	if err != nil {
-		mongoBin, err = exec.LookPath("mongo")
-		if err != nil {
-			return errors.New("neither 'mongosh' nor legacy 'mongo' CLI was found. Install it via 'brew install mongosh' or on Windows 'winget install MongoDB.Server'")
-		}
-	}
-
-	// 1. Resolve password from Secret Provider
-	var password string
-	if target.Secret.Item != "" {
-		color.HiBlack("Fetching Mongo credentials from [%s]...", target.Secret.Provider)
-		var err error
-		password, err = resolver.Resolve(ctx, target.Secret)
-		if err != nil {
-			return err
-		}
-		if password == "" {
-			return fmt.Errorf("retrieved password from [%s] for item %q is empty! Please check that the Password field in Bitwarden is filled",
-				target.Secret.Provider, target.Secret.Item)
-		}
-	} else if pwd := GetString(target.Properties, "password", ""); pwd != "" {
-		password = pwd
-	}
-
-	user := GetString(target.Properties, "user", "")
-	// If user is empty, attempt to fetch username from Secret Provider
-	if user == "" && target.Secret.Item != "" {
-		userSec := target.Secret
-		userSec.Field = "username"
-		if u, err := resolver.Resolve(ctx, userSec); err == nil && u != "" {
-			user = u
-		}
+		return err
 	}
 
 	// 2. Build Connection String
 	connURI := GetString(target.Properties, "uri", "")
 	if connURI != "" {
-		// Custom template: replace {{PASSWORD}}
+		// Custom template: replace {{PASSWORD}} and {{USER}}
 		if password != "" {
-			escapedPwd := url.QueryEscape(password)
-			connURI = strings.ReplaceAll(connURI, "{{PASSWORD}}", escapedPwd)
+			connURI = strings.ReplaceAll(connURI, "{{PASSWORD}}", url.QueryEscape(password))
+		}
+		if user != "" {
+			connURI = strings.ReplaceAll(connURI, "{{USER}}", url.QueryEscape(user))
 		}
 	} else {
 		host := GetString(target.Properties, "host", "localhost")
 		port := GetInt(target.Properties, "port", 27017)
-		user := GetString(target.Properties, "user", "")
 		dbName := GetString(target.Properties, "database", "")
 		authSource := GetString(target.Properties, "auth_source", "")
 		isSRV := GetBool(target.Properties, "srv", false)
@@ -134,14 +112,7 @@ func (c *MongoConnector) Connect(ctx context.Context, target config.ResolvedTarg
 		args = append(args, connURI)
 	}
 
-	// Extra args if any
-	if extra, ok := target.Properties["extra_args"].([]any); ok {
-		for _, a := range extra {
-			if s, ok := a.(string); ok {
-				args = append(args, s)
-			}
-		}
-	}
+	args = append(args, GetStringSlice(target.Properties, "extra_args")...)
 
 	// Mask password in display message
 	displayURI := maskMongoURI(connURI)

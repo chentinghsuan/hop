@@ -27,14 +27,21 @@ func (c *GCPVMConnector) Aliases() []string {
 }
 
 func (c *GCPVMConnector) ValidateDependencies() error {
-	if _, err := exec.LookPath("gcloud"); err != nil {
-		return errors.New("'gcloud' CLI is not found. Install Google Cloud SDK first")
+	_, err := findGcloudBin()
+	return err
+}
+
+func findGcloudBin() (string, error) {
+	binPath, err := exec.LookPath("gcloud")
+	if err != nil {
+		return "", errors.New("'gcloud' CLI is not found. Install Google Cloud SDK first")
 	}
-	return nil
+	return binPath, nil
 }
 
 func (c *GCPVMConnector) Connect(ctx context.Context, target config.ResolvedTarget, resolver secret.Resolver) error {
-	if err := c.ValidateDependencies(); err != nil {
+	binPath, err := findGcloudBin()
+	if err != nil {
 		return err
 	}
 
@@ -69,22 +76,10 @@ func (c *GCPVMConnector) Connect(ctx context.Context, target config.ResolvedTarg
 		args = append(args, "--tunnel-through-iap")
 	}
 
-	// Extra args if any
-	if extra, ok := target.Properties["extra_args"].([]any); ok {
-		for _, a := range extra {
-			if s, ok := a.(string); ok {
-				args = append(args, s)
-			}
-		}
-	}
+	args = append(args, GetStringSlice(target.Properties, "extra_args")...)
 
 	color.Cyan("Connecting to GCP VM: %s (zone: %s, project: %s)...", instance, zone, project)
-	color.HiBlackString("Executing: gcloud %v", args)
-
-	binPath, err := exec.LookPath("gcloud")
-	if err != nil {
-		return errors.New("'gcloud' CLI is not found. Install Google Cloud SDK first")
-	}
+	color.HiBlack("Executing: gcloud %v", args)
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Stdin = os.Stdin

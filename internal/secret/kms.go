@@ -25,15 +25,8 @@ func (k *GCPKMSProvider) Name() string {
 }
 
 func (k *GCPKMSProvider) Validate(ctx context.Context) error {
-	// First check if gcloud CLI is available
-	gcloudPath, err := exec.LookPath("gcloud")
-	if err == nil {
-		cmd := exec.CommandContext(ctx, gcloudPath, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
-		var stdout bytes.Buffer
-		cmd.Stdout = &stdout
-		if err := cmd.Run(); err == nil && strings.TrimSpace(stdout.String()) != "" {
-			return nil
-		}
+	if hasActiveGcloudAuth(ctx) {
+		return nil
 	}
 
 	// Next check SDK client
@@ -72,15 +65,10 @@ func (k *GCPKMSProvider) GetSecret(ctx context.Context, ref SecretRef) (string, 
 		plaintext, err = DecryptWithGcloud(ctx, key, ciphertext)
 	} else {
 		plaintext, err = DecryptWithSDK(ctx, key, ciphertext)
-		if err != nil && (mode == "" || mode == "sdk") {
-			// Auto fallback to gcloud if ADC missing
-			if strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "authentication") {
-				if gcloudPath, lookErr := exec.LookPath("gcloud"); lookErr == nil && gcloudPath != "" {
-					if fbVal, fbErr := DecryptWithGcloud(ctx, key, ciphertext); fbErr == nil {
-						plaintext = fbVal
-						err = nil
-					}
-				}
+		if isGCPCredentialError(err) {
+			if fbVal, fbErr := DecryptWithGcloud(ctx, key, ciphertext); fbErr == nil {
+				plaintext = fbVal
+				err = nil
 			}
 		}
 	}
@@ -214,3 +202,4 @@ func encryptWithGcloud(ctx context.Context, key, plaintext string) (string, erro
 
 	return base64.StdEncoding.EncodeToString(stdout.Bytes()), nil
 }
+

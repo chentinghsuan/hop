@@ -9,15 +9,27 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
-type GCPSecretProvider struct{}
+type gcpPayloadEntry struct {
+	done chan struct{}
+	data string
+	err  error
+}
+
+type GCPSecretProvider struct {
+	mu    sync.Mutex
+	cache map[string]*gcpPayloadEntry
+}
 
 func NewGCPSecretProvider() *GCPSecretProvider {
-	return &GCPSecretProvider{}
+	return &GCPSecretProvider{
+		cache: make(map[string]*gcpPayloadEntry),
+	}
 }
 
 func (g *GCPSecretProvider) Name() string {
@@ -25,15 +37,8 @@ func (g *GCPSecretProvider) Name() string {
 }
 
 func (g *GCPSecretProvider) Validate(ctx context.Context) error {
-	// First verify if gcloud CLI is available (useful for gcloud mode and auth status)
-	gcloudPath, err := exec.LookPath("gcloud")
-	if err == nil {
-		cmd := exec.CommandContext(ctx, gcloudPath, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
-		var stdout bytes.Buffer
-		cmd.Stdout = &stdout
-		if err := cmd.Run(); err == nil && strings.TrimSpace(stdout.String()) != "" {
-			return nil
-		}
+	if hasActiveGcloudAuth(ctx) {
+		return nil
 	}
 
 	// For SDK mode, verify client creation (ADC verification)
@@ -44,6 +49,25 @@ func (g *GCPSecretProvider) Validate(ctx context.Context) error {
 	_ = client.Close()
 
 	return nil
+}
+
+func hasActiveGcloudAuth(ctx context.Context) bool {
+	gcloudPath, err := exec.LookPath("gcloud")
+	if err != nil {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, gcloudPath, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	return cmd.Run() == nil && strings.TrimSpace(stdout.String()) != ""
+}
+
+func isGCPCredentialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "credentials") || strings.Contains(msg, "authentication")
 }
 
 func (g *GCPSecretProvider) GetSecret(ctx context.Context, ref SecretRef) (string, error) {
@@ -62,6 +86,26 @@ func (g *GCPSecretProvider) GetSecret(ctx context.Context, ref SecretRef) (strin
 		project = ref.Vault // backward compatibility with vault field
 	}
 
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s", mode, project, ref.Item, version)
+
+	g.mu.Lock()
+	if entry, ok := g.cache[cacheKey]; ok {
+		g.mu.Unlock()
+		select {
+		case <-entry.done:
+			if entry.err == nil {
+				return extractJSONField(entry.data, ref.Field)
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		g.mu.Lock()
+	}
+
+	entry := &gcpPayloadEntry{done: make(chan struct{})}
+	g.cache[cacheKey] = entry
+	g.mu.Unlock()
+
 	var rawPayload string
 	var err error
 
@@ -69,18 +113,25 @@ func (g *GCPSecretProvider) GetSecret(ctx context.Context, ref SecretRef) (strin
 		rawPayload, err = g.getViaGcloud(ctx, ref.Item, version, project)
 	} else {
 		rawPayload, err = g.getViaSDK(ctx, ref.Item, version, project)
-		if err != nil && (mode == "" || mode == "sdk") {
-			// If SDK fails due to missing ADC, provide clean fallback suggestion or attempt gcloud
-			if strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "authentication") {
-				if gcloudPath, lookErr := exec.LookPath("gcloud"); lookErr == nil && gcloudPath != "" {
-					if fallbackVal, fbErr := g.getViaGcloud(ctx, ref.Item, version, project); fbErr == nil {
-						rawPayload = fallbackVal
-						err = nil
-					}
-				}
+		if isGCPCredentialError(err) {
+			if fallbackVal, fbErr := g.getViaGcloud(ctx, ref.Item, version, project); fbErr == nil {
+				rawPayload = fallbackVal
+				err = nil
 			}
 		}
 	}
+
+	entry.data = rawPayload
+	entry.err = err
+
+	if err != nil {
+		g.mu.Lock()
+		if g.cache[cacheKey] == entry {
+			delete(g.cache, cacheKey)
+		}
+		g.mu.Unlock()
+	}
+	close(entry.done)
 
 	if err != nil {
 		return "", err
@@ -154,25 +205,26 @@ func buildSecretResourceName(item, version, project string) string {
 }
 
 func extractJSONField(data string, field string) (string, error) {
-	if field == "" {
-		return data, nil
-	}
-
 	var m map[string]any
-	if err := json.Unmarshal([]byte(data), &m); err != nil {
-		// Not JSON, return raw or error if field specifically requested
+	if err := json.Unmarshal([]byte(data), &m); err == nil {
+		targetField := field
+		if targetField == "" {
+			targetField = "password"
+		}
+		if val, ok := m[targetField]; ok {
+			return fmt.Sprintf("%v", val), nil
+		}
+		if field != "" {
+			var keys []string
+			for k := range m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return "", fmt.Errorf("field %q not found in secret JSON (available keys: %s)", field, strings.Join(keys, ", "))
+		}
+	} else if field != "" {
 		return "", fmt.Errorf("secret payload is not JSON, cannot extract field %q: %w", field, err)
 	}
 
-	val, ok := m[field]
-	if !ok {
-		var keys []string
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		return "", fmt.Errorf("field %q not found in secret JSON (available keys: %s)", field, strings.Join(keys, ", "))
-	}
-
-	return fmt.Sprintf("%v", val), nil
+	return data, nil
 }
