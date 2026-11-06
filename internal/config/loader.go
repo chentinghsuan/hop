@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,19 +17,36 @@ const (
 	LegacyEnvConfigVar  = "ENV_LOGIN_CONFIG"
 )
 
-// GetDefaultConfigPath returns standard user config path for the current OS.
-// On Windows: %APPDATA%\hop\config.yaml (or ~/.config/hop/config.yaml if APPDATA is unset)
-// On Linux/macOS: ~/.config/hop/config.yaml
-func GetDefaultConfigPath() (string, error) {
-	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
-		return filepath.Join(configDir, ConfigDirName, ConfigFileName), nil
+// GetDefaultConfigDir returns standard user config directory for the current OS.
+// On Windows: %APPDATA%\hop (or ~/.config/hop if APPDATA is unset)
+// On Linux/macOS: ~/.config/hop (respects $XDG_CONFIG_HOME if set)
+func GetDefaultConfigDir() (string, error) {
+	if runtime.GOOS == "windows" {
+		if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+			return filepath.Join(configDir, ConfigDirName), nil
+		}
+	} else {
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, ConfigDirName), nil
+		}
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("could not determine user home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", ConfigDirName, ConfigFileName), nil
+	return filepath.Join(home, ".config", ConfigDirName), nil
+}
+
+// GetDefaultConfigPath returns standard user config path for the current OS.
+// On Windows: %APPDATA%\hop\config.yaml (or ~/.config/hop/config.yaml if APPDATA is unset)
+// On Linux/macOS: ~/.config/hop/config.yaml (respects $XDG_CONFIG_HOME if set)
+func GetDefaultConfigPath() (string, error) {
+	dir, err := GetDefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, ConfigFileName), nil
 }
 
 // FindConfigFile checks multiple standard paths for a valid config file.
@@ -52,14 +70,13 @@ func FindConfigFile(customPath string) (string, error) {
 		}
 	}
 
-	// 2. Check standard OS config directories (%APPDATA% on Windows, ~/.config on Linux/macOS)
 	var userConfigs []string
-	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+
+	// 2. Primary default config directory (~/.config/hop on Linux/macOS, %APPDATA%\hop on Windows)
+	if defDir, err := GetDefaultConfigDir(); err == nil && defDir != "" {
 		userConfigs = append(userConfigs,
-			filepath.Join(configDir, ConfigDirName, "config.yaml"),
-			filepath.Join(configDir, ConfigDirName, "config.yml"),
-			filepath.Join(configDir, LegacyConfigDirName, "config.yaml"),
-			filepath.Join(configDir, LegacyConfigDirName, "config.yml"),
+			filepath.Join(defDir, "config.yaml"),
+			filepath.Join(defDir, "config.yml"),
 		)
 	}
 
@@ -71,6 +88,16 @@ func FindConfigFile(customPath string) (string, error) {
 			filepath.Join(home, ".config", ConfigDirName, "config.yml"),
 			filepath.Join(home, ".config", LegacyConfigDirName, "config.yaml"),
 			filepath.Join(home, ".config", LegacyConfigDirName, "config.yml"),
+		)
+	}
+
+	// 3. Fallback: OS standard config directory (%APPDATA% on Windows, ~/Library/Application Support on macOS for backward compatibility)
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		userConfigs = append(userConfigs,
+			filepath.Join(configDir, ConfigDirName, "config.yaml"),
+			filepath.Join(configDir, ConfigDirName, "config.yml"),
+			filepath.Join(configDir, LegacyConfigDirName, "config.yaml"),
+			filepath.Join(configDir, LegacyConfigDirName, "config.yml"),
 		)
 	}
 

@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -176,5 +179,64 @@ environments:
 	// 3. Verify empty default Field so plain secrets in GCP/KMS work without JSON parsing errors
 	if kmsTarget.Secret.Field != "" {
 		t.Errorf("expected empty default Field, got %q", kmsTarget.Secret.Field)
+	}
+}
+
+func TestGetDefaultConfigPath(t *testing.T) {
+	dir, err := GetDefaultConfigDir()
+	if err != nil {
+		t.Fatalf("unexpected error getting default config dir: %v", err)
+	}
+	path, err := GetDefaultConfigPath()
+	if err != nil {
+		t.Fatalf("unexpected error getting default config path: %v", err)
+	}
+
+	expectedPath := filepath.Join(dir, ConfigFileName)
+	if path != expectedPath {
+		t.Errorf("expected path %q, got %q", expectedPath, path)
+	}
+
+	if runtime.GOOS != "windows" {
+		home, err := os.UserHomeDir()
+		if err == nil && os.Getenv("XDG_CONFIG_HOME") == "" {
+			expectedDir := filepath.Join(home, ".config", ConfigDirName)
+			if dir != expectedDir {
+				t.Errorf("expected unix config dir %q, got %q", expectedDir, dir)
+			}
+		}
+	}
+}
+
+func TestFindConfigFile_CustomAndDefault(t *testing.T) {
+	// Non-existent custom path should error
+	_, err := FindConfigFile("/path/to/non/existent/hop/config.yaml")
+	if err == nil {
+		t.Errorf("expected error for non-existent custom path")
+	}
+
+	// Test finding a temporary config file
+	tmpDir := t.TempDir()
+	tmpConfig := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(tmpConfig, []byte("version: \"1.0\"\n"), 0600); err != nil {
+		t.Fatalf("failed to write tmp config: %v", err)
+	}
+
+	found, err := FindConfigFile(tmpConfig)
+	if err != nil {
+		t.Fatalf("failed to find custom config: %v", err)
+	}
+	if found != tmpConfig {
+		t.Errorf("expected %q, got %q", tmpConfig, found)
+	}
+
+	// Test finding via HOP_CONFIG env var
+	t.Setenv(EnvConfigVar, tmpConfig)
+	foundEnv, err := FindConfigFile("")
+	if err != nil {
+		t.Fatalf("failed to find config via env: %v", err)
+	}
+	if foundEnv != tmpConfig {
+		t.Errorf("expected %q via env, got %q", tmpConfig, foundEnv)
 	}
 }

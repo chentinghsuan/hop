@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/ting-hsuanchen/hop/internal/config"
 )
 
 var loadEnvOnce sync.Once
@@ -15,11 +17,17 @@ var loadEnvOnce sync.Once
 func loadDotEnvFiles() {
 	loadEnvOnce.Do(func() {
 		// Priority 1: ~/.config/hop/.env (or %APPDATA%\hop\.env)
-		if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
-			parseAndSetEnv(filepath.Join(configDir, "hop", ".env"))
+		if configDir, err := config.GetDefaultConfigDir(); err == nil && configDir != "" {
+			parseAndSetEnv(filepath.Join(configDir, ".env"))
 		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
 			parseAndSetEnv(filepath.Join(home, ".config", "hop", ".env"))
 		}
+
+		// Also check OS user config directory for backward compatibility (e.g. ~/Library/Application Support on macOS)
+		if osConfigDir, err := os.UserConfigDir(); err == nil && osConfigDir != "" {
+			parseAndSetEnv(filepath.Join(osConfigDir, "hop", ".env"))
+		}
+
 		// Priority 2: ./.env (current working directory)
 		parseAndSetEnv(".env")
 	})
